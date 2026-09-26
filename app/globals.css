@@ -1,0 +1,290 @@
+:root {
+  --bg: #f3f4f6;
+  --panel: #ffffff;
+  --panel-2: #f9fafb;
+  --border: #e5e7eb;
+  --text: #111827;
+  --text-2: #374151;
+  --muted: #6b7280;
+  --blue: #2563eb;
+  --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 4px 16px rgba(15, 23, 42, .06);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button { font: inherit; }
+
+.shell {
+  min-height: 100vh;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.topbar {
+  max-width: 1500px;
+  margin: 0 auto 18px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.eyebrow {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .18em;
+}
+
+h1 {
+  margin: 5px 0 2px;
+  font-size: 30px;
+  letter-spacing: -.04em;
+  color: var(--text-2);
+}
+
+.mapCard {
+  max-width: 1500px;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.toolbar {
+  min-height: 62px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  position: relative;
+  z-index: 5;
+}
+
+.segmented {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.segmented button {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 11px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.segmented button:hover { color: var(--text); }
+
+.segmented button.active {
+  color: #1e3a8a;
+  background: #dbeafe;
+  box-shadow: inset 0 0 0 1px #bfdbfe;
+}
+
+.mapWrap {
+  height: min(72vh, 760px);
+  min-height: 560px;
+  position: relative;
+  background: #ffffff;
+}
+
+.mapWrap > div { outline: none; }
+
+/* Loading screen over the map area; fades out once the map is ready */
+.mapLoading {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  transition: opacity .35s ease, visibility 0s linear 0s;
+}
+
+.mapLoading.done {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .35s ease, visibility 0s linear .35s;
+}
+
+/* transform-only animation runs on the compositor, so it keeps spinning while the
+   main thread is busy compiling WebGL shaders */
+.spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid #dbeafe;
+  border-top-color: #2563eb;
+  animation: spin .8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
+
+/* Cluster counts: HTML text centered on the deck.gl bubbles; clicks pass through to the map */
+.clusterLabels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.clusterLabel {
+  position: absolute;
+  /* fixed, even-sized box so the centered text sits on whole pixels */
+  left: -24px;
+  top: -8px;
+  width: 48px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.legend, .details {
+  position: absolute;
+  z-index: 4;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, .92);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+}
+
+.legend {
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: var(--text-2);
+  font-size: 10px;
+}
+
+.legend span { display: flex; align-items: center; gap: 5px; }
+
+.legend.scale { flex-direction: column; gap: 6px; width: 200px; }
+.scaleTitle { color: var(--muted); }
+.scaleBar {
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #dbeafe, #bfdbfe, #93c5fd, #60a5fa, #3b82f6, #2563eb, #1d4ed8, #1e40af, #1e3a8a);
+}
+.scaleLabels { display: flex; justify-content: space-between; color: var(--text-2); }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.dot.low { background: #60a5fa; }
+.dot.medium { background: #3b82f6; }
+.dot.high { background: #1d4ed8; }
+.dot.critical { background: #1e3a8a; }
+
+.details {
+  top: 16px;
+  right: 16px;
+  width: 270px;
+  padding: 18px;
+  border-radius: 11px;
+}
+
+.details h2 {
+  margin: 5px 0 2px;
+  font-size: 19px;
+  letter-spacing: -.03em;
+  color: var(--text);
+}
+
+.location {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.close {
+  position: absolute;
+  right: 10px;
+  top: 8px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 22px;
+  cursor: pointer;
+}
+
+.risk {
+  display: inline-block;
+  margin: 13px 0;
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}
+
+.risk.low { color: #1d4ed8; background: #eff6ff; }
+.risk.medium { color: #1e40af; background: #dbeafe; }
+.risk.high { color: #ffffff; background: #1d4ed8; }
+.risk.critical { color: #ffffff; background: #1e3a8a; }
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.detailGrid span { color: var(--muted); font-size: 10px; }
+.detailGrid strong { font-size: 11px; color: var(--text); }
+
+footer {
+  max-width: 1500px;
+  margin: 10px auto 0;
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+@media (max-width: 800px) {
+  .shell { padding: 12px; }
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .toolbar { align-items: flex-start; flex-direction: column; }
+  .mapWrap { min-height: 520px; height: 70vh; }
+  footer { flex-direction: column; gap: 4px; }
+}
