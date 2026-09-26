@@ -9,10 +9,10 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@deck.gl/aggregation-layers": "^9.4.0",
-    "@deck.gl/core": "^9.1.12",
-    "@deck.gl/layers": "^9.1.12",
-    "@deck.gl/react": "^9.1.12",
+    "@deck.gl/aggregation-layers": "~9.3.11",
+    "@deck.gl/core": "~9.3.11",
+    "@deck.gl/layers": "~9.3.11",
+    "@deck.gl/react": "~9.3.11",
     "@vis.gl/react-maplibre": "^8.0.2",
     "maplibre-gl": "^5.6.1",
     "next": "^15.5.4",

@@ -39,6 +39,8 @@ Os 25.000 pontos são sintéticos e gerados deterministicamente no browser. Não
 
 O mapa usa tiles/style público do CARTO. Para produção, troque por um provedor de tiles adequado ao seu ambiente/licença.
 
+O deck.gl está fixado em `~9.3.11` de propósito: com deck.gl 9.4.0 (luma.gl 9.4.x) o primeiro desenho das `ScatterplotLayer` (clusters/pins) derruba o processo de GPU do Chrome (`GPU process exited unexpectedly: exit_code=-1073741819`), os contextos WebGL são perdidos e o mapa fica em branco ao clicar num país ou dar zoom. Antes de subir para 9.4+, teste clicar num país e num cluster no Chrome.
+
 ## Onde trocar os dados
 
 A função `makePoints(25000)` em:
