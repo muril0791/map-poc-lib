@@ -111,7 +111,6 @@ h1 {
 
 .mapWrap > div { outline: none; }
 
-/* Loading screen over the map area; fades out once the map is ready */
 .mapLoading {
   position: absolute;
   inset: 0;
@@ -134,8 +133,6 @@ h1 {
   transition: opacity .35s ease, visibility 0s linear .35s;
 }
 
-/* transform-only animation runs on the compositor, so it keeps spinning while the
-   main thread is busy compiling WebGL shaders */
 .spinner {
   width: 28px;
   height: 28px;
@@ -151,7 +148,6 @@ h1 {
   .spinner { animation-duration: 2.4s; }
 }
 
-/* Cluster counts: HTML text centered on the deck.gl bubbles; clicks pass through to the map */
 .clusterLabels {
   position: absolute;
   inset: 0;
@@ -162,7 +158,6 @@ h1 {
 
 .clusterLabel {
   position: absolute;
-  /* fixed, even-sized box so the centered text sits on whole pixels */
   left: -24px;
   top: -8px;
   width: 48px;

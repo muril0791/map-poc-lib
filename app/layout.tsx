@@ -4,10 +4,6 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 import { inter } from "./fonts";
 
-// The basemap loads as a chain (style -> tiles.json -> tiles -> glyphs) that only starts once
-// MapLibre runs; these hints let the browser fetch the fixed parts with the HTML instead.
-// Options match how MapLibre and our own fetch() request them (CORS, no credentials), so the
-// preloaded responses get reused rather than downloaded twice.
 const CORS = { crossOrigin: "anonymous" } as const;
 const BASEMAP_PRELOADS = [
   "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
