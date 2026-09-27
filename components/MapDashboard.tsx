@@ -175,6 +175,15 @@ const COLORS: Record<Severity, [number, number, number]> = {
 
 class StablePinchMapController extends MapController {
   handleEvent(event: Parameters<MapController["handleEvent"]>[0]) {
+    if ("device" in event && event.device === "trackpad") {
+      const { scrollZoom } = this;
+      this.scrollZoom = { speed: event.srcEvent.ctrlKey ? 0.02 : 0.01, smooth: false };
+      try {
+        return super.handleEvent(event);
+      } finally {
+        this.scrollZoom = scrollZoom;
+      }
+    }
     if (event.type !== "pinchend") return super.handleEvent(event);
     const { inertia, onViewStateChange } = this;
     this.inertia = 0;
@@ -356,6 +365,7 @@ export default function MapDashboard() {
 
   const [heatZoomLevel, setHeatZoomLevel] = useState(Math.floor(INITIAL_VIEW.zoom));
   const zoomRef = useRef(INITIAL_VIEW.zoom);
+  const heatZoomTimerRef = useRef<number>(undefined);
 
   const zoomLevel = Math.floor(dataZoom);
   const countryView = dataZoom < COUNTRY_MAX_ZOOM;
@@ -576,8 +586,12 @@ export default function MapDashboard() {
               setViewState(next);
             }}
             onInteractionStateChange={({ inTransition, isDragging, isPanning, isRotating, isZooming }) => {
+              window.clearTimeout(heatZoomTimerRef.current);
               if (!(inTransition || isDragging || isPanning || isRotating || isZooming)) {
-                setHeatZoomLevel(Math.floor(zoomRef.current));
+                heatZoomTimerRef.current = window.setTimeout(
+                  () => setHeatZoomLevel(Math.floor(zoomRef.current)),
+                  100
+                );
               }
             }}
             onAfterRender={() => {
