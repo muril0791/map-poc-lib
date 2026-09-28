@@ -4,10 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { HeatmapLayer } from "@deck.gl/aggregation-layers";
 import { GeoJsonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { CollisionFilterExtension } from "@deck.gl/extensions";
 import { FlyToInterpolator, MapController, WebMercatorViewport } from "@deck.gl/core";
 import { Map } from "@vis.gl/react-maplibre";
 import Supercluster from "supercluster";
-import type { MapViewState, PickingInfo } from "@deck.gl/core";
+import type { MapViewState, PickingInfo, UpdateParameters } from "@deck.gl/core";
+import type { CollisionFilterExtensionProps } from "@deck.gl/extensions";
 import type { Feature, MultiPolygon, Polygon } from "geojson";
 import CITIES from "../data/cities.json";
 import { inter } from "../app/fonts";
@@ -22,6 +24,7 @@ type GeoPoint = {
   weight: number;
   severity: Severity;
   country: string;
+  region: string;
   city: string;
   events: number;
 };
@@ -41,7 +44,15 @@ const COUNTRY_SHARES: [country: string, share: number][] = [
   ["AR", 0.02], ["AE", 0.02], ["KR", 0.02], ["AU", 0.02], ["ZA", 0.02]
 ];
 
-type City = [name: string, country: string, lon: number, lat: number, population: number, maxJitter: number];
+type City = [
+  name: string,
+  country: string,
+  lon: number,
+  lat: number,
+  population: number,
+  maxJitter: number,
+  region: string
+];
 
 function pickWeighted(weights: number[], total: number, roll: number) {
   let remaining = roll * total;
@@ -75,7 +86,7 @@ function makePoints(count: number): GeoPoint[] {
 
   for (let i = 0; i < count; i++) {
     const country = countries[pickWeighted(shares, sharesTotal, rand())];
-    const [cityName, iso, cityLon, cityLat, population, maxJitter] =
+    const [cityName, iso, cityLon, cityLat, population, maxJitter, region] =
       country.cities[pickWeighted(country.weights, country.total, rand())];
 
     const jitter = Math.min(maxJitter, 0.004 * Math.sqrt(population / 100000));
@@ -111,6 +122,7 @@ function makePoints(count: number): GeoPoint[] {
       weight: Math.min(1, events / 1600),
       severity,
       country: iso,
+      region,
       city: cityName,
       events
     });
@@ -119,14 +131,47 @@ function makePoints(count: number): GeoPoint[] {
   return points;
 }
 
+function groupBy(points: GeoPoint[], key: (point: GeoPoint) => string) {
+  const groups = new globalThis.Map<string, GeoPoint[]>();
+  for (const point of points) {
+    const group = groups.get(key(point));
+    if (group) group.push(point);
+    else groups.set(key(point), [point]);
+  }
+  return [...groups];
+}
+
+function summarize(group: GeoPoint[]) {
+  let lon = 0, lat = 0;
+  let west = 180, south = 90, east = -180, north = -90;
+  for (const p of group) {
+    lon += p.longitude;
+    lat += p.latitude;
+    west = Math.min(west, p.longitude);
+    east = Math.max(east, p.longitude);
+    south = Math.min(south, p.latitude);
+    north = Math.max(north, p.latitude);
+  }
+  return {
+    count: group.length,
+    centroid: [lon / group.length, lat / group.length] as [number, number],
+    bounds: [[west, south], [east, north]] as [[number, number], [number, number]]
+  };
+}
+
 const COUNTRY_MAX_ZOOM = 3;
+const STATE_MAX_ZOOM = 6;
 const CLUSTER_MAX_ZOOM = 9;
 const WORLD_BBOX: [number, number, number, number] = [-180, -85, 180, 85];
-const NO_POINTS: GeoPoint[] = [];
 
 type CountryShape = Feature<Polygon | MultiPolygon, { iso: string; name: string; label: [number, number] }>;
+type RegionShape = Feature<
+  Polygon | MultiPolygon,
+  { id: string; iso: string; name: string; label: [number, number] }
+>;
 type CountryIndex = Supercluster<GeoPoint>;
 type Cluster = { id: number; iso: string; position: [number, number]; count: number };
+type Total = { count: number; position: [number, number] };
 
 const RAMP: [number, number, number][] = [
   [219, 234, 254],
@@ -147,6 +192,21 @@ function rampColor(t: number): [number, number, number] {
   return RAMP[i].map((c, k) => Math.round(c + (RAMP[i + 1][k] - c) * f)) as [number, number, number];
 }
 
+function luminance(color: [number, number, number]) {
+  const [r, g, b] = color.map((c) => {
+    const s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+const LABEL_NAVY: [number, number, number] = [30, 58, 138];
+
+function prefersWhiteText(fill: [number, number, number]) {
+  const l = luminance(fill) + 0.05;
+  return 1.05 / l >= l / (luminance(LABEL_NAVY) + 0.05);
+}
+
 function logScale(min: number, max: number) {
   const lo = Math.log(min);
   const hi = Math.log(max);
@@ -164,7 +224,81 @@ const LABEL_FONT = {
   fontSettings: { sdf: true, fontSize: 96, buffer: 8, radius: 12 }
 };
 
+function totalsStyle<T extends Total>(onDark: boolean) {
+  return {
+    getPosition: (d: T) => d.position,
+    getText: (d: T) => formatCount(d.count),
+    getColor: onDark ? ([255, 255, 255] as [number, number, number]) : LABEL_NAVY,
+    getSize: 14,
+    ...LABEL_FONT,
+    outlineWidth: onDark ? 2.5 : 0,
+    outlineColor: [...LABEL_NAVY, 200] as [number, number, number, number]
+  };
+}
+
+const LABEL_COLLISION = [new CollisionFilterExtension()];
+const STATE_LABEL_COLLISION_TEST = { sizeScale: 2.6 };
+const EMPTY_STATE_FILL: [number, number, number] = [239, 246, 255];
+
+const BAND_FADE_MS = 300;
+const CLUSTER_FADE_MS = 250;
+const BAND_FADE = { opacity: BAND_FADE_MS };
+const CLUSTER_FADE = { opacity: CLUSTER_FADE_MS };
+
+const HEAT_COLORS: [number, number, number][] = [
+  [147, 197, 253],
+  [96, 165, 250],
+  [59, 130, 246],
+  [29, 78, 216],
+  [30, 58, 138]
+];
+
 const clusterRadius = (count: number) => 10 + 4 * Math.log10(count);
+
+type ClusterSet = { clusters: Cluster[]; singles: GeoPoint[] };
+const NO_CLUSTERS: ClusterSet = { clusters: [], singles: [] };
+
+function clustersAt(countries: { iso: string; index: CountryIndex }[], level: number): ClusterSet {
+  const clusters: Cluster[] = [];
+  const singles: GeoPoint[] = [];
+  for (const country of countries) {
+    for (const feature of country.index.getClusters(WORLD_BBOX, level)) {
+      const props = feature.properties;
+      if ("cluster" in props) {
+        clusters.push({
+          id: props.cluster_id,
+          iso: country.iso,
+          position: feature.geometry.coordinates as [number, number],
+          count: props.point_count
+        });
+      } else {
+        singles.push(props);
+      }
+    }
+  }
+  return { clusters, singles };
+}
+
+class DormantHeatmapLayer extends HeatmapLayer<GeoPoint> {
+  static layerName = "DormantHeatmapLayer";
+
+  shouldUpdateState(params: UpdateParameters<this>) {
+    return this.props.visible && super.shouldUpdateState(params);
+  }
+}
+
+function useLinger(active: boolean, ms: number) {
+  const [lingering, setLingering] = useState(active);
+  useEffect(() => {
+    if (active) {
+      setLingering(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setLingering(false), ms);
+    return () => window.clearTimeout(timer);
+  }, [active, ms]);
+  return active || lingering;
+}
 
 const COLORS: Record<Severity, [number, number, number]> = {
   low: [96, 165, 250],
@@ -173,9 +307,18 @@ const COLORS: Record<Severity, [number, number, number]> = {
   critical: [30, 58, 138]
 };
 
+const WHEEL_MS = 250;
+const WHEEL_EASING = (t: number) => 1 - (1 - t) ** 3;
+
+type ControllerEvent = Parameters<MapController["handleEvent"]>[0];
+
 class StablePinchMapController extends MapController {
-  handleEvent(event: Parameters<MapController["handleEvent"]>[0]) {
+  private wheelTarget: { viewState: MapViewState; until: number } | null = null;
+
+  handleEvent(event: ControllerEvent) {
+    if (event.type !== "wheel") this.wheelTarget = null;
     if ("device" in event && event.device === "trackpad") {
+      this.wheelTarget = null;
       const { scrollZoom } = this;
       this.scrollZoom = { speed: event.srcEvent.ctrlKey ? 0.02 : 0.01, smooth: false };
       try {
@@ -184,6 +327,7 @@ class StablePinchMapController extends MapController {
         this.scrollZoom = scrollZoom;
       }
     }
+    if (event.type === "wheel") return this.handleMouseWheel(event);
     if (event.type !== "pinchend") return super.handleEvent(event);
     const { inertia, onViewStateChange } = this;
     this.inertia = 0;
@@ -192,6 +336,23 @@ class StablePinchMapController extends MapController {
       return super.handleEvent(event);
     } finally {
       this.inertia = inertia;
+      this.onViewStateChange = onViewStateChange;
+    }
+  }
+
+  private handleMouseWheel(event: ControllerEvent) {
+    const { props, onViewStateChange } = this;
+    const target = this.wheelTarget;
+    if (target && performance.now() < target.until) this.props = { ...props, ...target.viewState };
+    this.onViewStateChange = (params) => {
+      const viewState = params.viewState as MapViewState;
+      this.wheelTarget = { viewState, until: performance.now() + WHEEL_MS };
+      onViewStateChange({ ...params, viewState: { ...viewState, transitionEasing: WHEEL_EASING } });
+    };
+    try {
+      return super.handleEvent(event);
+    } finally {
+      this.props = props;
       this.onViewStateChange = onViewStateChange;
     }
   }
@@ -208,11 +369,13 @@ const BASEMAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.
 
 const MAPLIBRE = typeof window === "undefined" ? undefined : import("maplibre-gl");
 
-const BASEMAP_PAINT: [layer: string, property: string, value: string][] = [
+const BASEMAP_PAINT: [layer: string, property: string, value: unknown][] = [
   ["background", "background-color", "#eef1f5"],
   ["water", "fill-color", "#ffffff"],
   ["boundary_country_inner", "line-color", "#93c5fd"],
-  ["boundary_state", "line-color", "#dbeafe"],
+  ["boundary_state", "line-color", "#93c5fd"],
+  ["boundary_state", "line-opacity", ["interpolate", ["linear"], ["zoom"], STATE_MAX_ZOOM - 0.3, 0, STATE_MAX_ZOOM, 1]],
+  ["boundary_state", "line-width", ["interpolate", ["linear"], ["zoom"], STATE_MAX_ZOOM, 1, 9, 1.4]],
   ["watername_ocean", "text-halo-color", "#ffffff"],
   ["watername_sea", "text-halo-color", "#ffffff"]
 ];
@@ -299,46 +462,45 @@ export default function MapDashboard() {
     return () => (hasIdle ? window.cancelIdleCallback(handle) : window.clearTimeout(handle));
   }, [mapLoading, prewarmLayers]);
 
-  const countries = useMemo(() => {
-    const groups = new globalThis.Map<string, GeoPoint[]>();
-    for (const point of points) {
-      const group = groups.get(point.country);
-      if (group) group.push(point);
-      else groups.set(point.country, [point]);
-    }
+  const countries = useMemo(
+    () =>
+      groupBy(points, (p) => p.country).map(([iso, group]) => {
+        const index: CountryIndex = new Supercluster<GeoPoint>({
+          radius: 60,
+          maxZoom: CLUSTER_MAX_ZOOM
+        }).load(
+          group.map((p) => ({
+            type: "Feature" as const,
+            properties: p,
+            geometry: { type: "Point" as const, coordinates: [p.longitude, p.latitude] }
+          }))
+        );
+        return { iso, ...summarize(group), index };
+      }),
+    [points]
+  );
 
-    return [...groups].map(([iso, group]) => {
-      let lon = 0, lat = 0;
-      let west = 180, south = 90, east = -180, north = -90;
-      for (const p of group) {
-        lon += p.longitude;
-        lat += p.latitude;
-        west = Math.min(west, p.longitude);
-        east = Math.max(east, p.longitude);
-        south = Math.min(south, p.latitude);
-        north = Math.max(north, p.latitude);
-      }
+  const regions = useMemo(
+    () => groupBy(points, (p) => p.region).map(([id, group]) => ({ id, ...summarize(group) })),
+    [points]
+  );
 
-      const index: CountryIndex = new Supercluster<GeoPoint>({
-        radius: 60,
-        maxZoom: CLUSTER_MAX_ZOOM
-      }).load(
-        group.map((p) => ({
-          type: "Feature" as const,
-          properties: p,
-          geometry: { type: "Point" as const, coordinates: [p.longitude, p.latitude] }
-        }))
-      );
+  const regionById = useMemo(() => new globalThis.Map(regions.map((r) => [r.id, r])), [regions]);
 
-      return {
-        iso,
-        count: group.length,
-        centroid: [lon / group.length, lat / group.length] as [number, number],
-        bounds: [[west, south], [east, north]] as [[number, number], [number, number]],
-        index
-      };
-    });
-  }, [points]);
+  const regionColorScale = useMemo(() => {
+    const totals = regions.map((r) => r.count);
+    return totals.length ? logScale(Math.min(...totals), Math.max(...totals)) : () => 0;
+  }, [regions]);
+
+  const [regionShapes, setRegionShapes] = useState<RegionShape[]>([]);
+
+  useEffect(() => {
+    if (mapLoading) return;
+    fetch("/states-10m.json")
+      .then((response) => response.json())
+      .then((collection) => setRegionShapes(collection.features))
+      .catch(() => setRegionShapes([]));
+  }, [mapLoading]);
 
   const countryByIso = useMemo(
     () => new globalThis.Map(countries.map((c) => [c.iso, c])),
@@ -360,59 +522,80 @@ export default function MapDashboard() {
     return countries.map((c) => ({ ...c, position: labelByIso.get(c.iso) ?? c.centroid }));
   }, [countries, countryShapes]);
 
+  const regionShapesWithEvents = useMemo(
+    () => regionShapes.filter((shape) => countryByIso.has(shape.properties.iso)),
+    [regionShapes, countryByIso]
+  );
+
+  const regionLabels = useMemo(() => {
+    const labelById = new globalThis.Map(regionShapes.map((s) => [s.properties.id, s.properties.label]));
+    return regions.map((r) => ({ ...r, position: labelById.get(r.id) ?? r.centroid }));
+  }, [regions, regionShapes]);
+
   const [flightZoom, setFlightZoom] = useState<number | null>(null);
   const dataZoom = flightZoom ?? viewState.zoom;
 
   const [heatZoomLevel, setHeatZoomLevel] = useState(Math.floor(INITIAL_VIEW.zoom));
   const zoomRef = useRef(INITIAL_VIEW.zoom);
+  const cameraBusyRef = useRef(false);
   const heatZoomTimerRef = useRef<number>(undefined);
 
   const zoomLevel = Math.floor(dataZoom);
   const countryView = dataZoom < COUNTRY_MAX_ZOOM;
-  const clusterView = !countryView && zoomLevel <= CLUSTER_MAX_ZOOM;
+  const stateView = !countryView && dataZoom < STATE_MAX_ZOOM;
+  const totalsView = countryView || stateView;
+  const clusterView = !totalsView && zoomLevel <= CLUSTER_MAX_ZOOM;
 
-  const { clusters, singles } = useMemo(() => {
-    const clusters: Cluster[] = [];
-    const singles: GeoPoint[] = [];
-    if (!clusterView) return { clusters, singles };
-
-    for (const country of countries) {
-      for (const feature of country.index.getClusters(WORLD_BBOX, zoomLevel)) {
-        const props = feature.properties;
-        if ("cluster" in props) {
-          clusters.push({
-            id: props.cluster_id,
-            iso: country.iso,
-            position: feature.geometry.coordinates as [number, number],
-            count: props.point_count
-          });
-        } else {
-          singles.push(props);
-        }
-      }
-    }
-    return { clusters, singles };
-  }, [countries, clusterView, zoomLevel]);
-
-  const pins = countryView ? NO_POINTS : clusterView ? singles : points;
   const showPins = mode !== "heatmap";
-  const showHeatmap = mode === "heatmap" || (mode === "both" && !countryView);
+  const showHeatmap = mode === "heatmap" || (mode === "both" && !totalsView);
   const showCountries = showPins && countryView;
+  const showStates = showPins && stateView;
   const showClusters = showPins && clusterView;
-  const showPoints = showPins && !countryView;
+  const showAllPins = showPins && !totalsView && !clusterView;
+  const legendTotals = (countryView ? countries : regions).map((total) => total.count);
+
+  const heatVisible = useLinger(showHeatmap, BAND_FADE_MS);
+  const countriesVisible = useLinger(showCountries, BAND_FADE_MS);
+  const statesVisible = useLinger(showStates, BAND_FADE_MS);
+  const allPinsVisible = useLinger(showAllPins, BAND_FADE_MS);
+
+  useEffect(() => {
+    if (showHeatmap && !cameraBusyRef.current) setHeatZoomLevel(Math.floor(zoomRef.current));
+  }, [showHeatmap]);
+
+  const clusterLevels = useMemo(() => {
+    const levels = new globalThis.Map<number, ClusterSet>();
+    for (let level = STATE_MAX_ZOOM; level <= CLUSTER_MAX_ZOOM; level++) {
+      levels.set(level, clustersAt(countries, level));
+    }
+    return levels;
+  }, [countries]);
+
+  const clusterLevel = Math.min(Math.max(zoomLevel, STATE_MAX_ZOOM), CLUSTER_MAX_ZOOM);
+  const clusterSlot = clusterLevel % 2;
+  const [slotLevels, setSlotLevels] = useState<(number | null)[]>([null, null]);
+  if (slotLevels[clusterSlot] !== clusterLevel) {
+    setSlotLevels(slotLevels.map((level, slot) => (slot === clusterSlot ? clusterLevel : level)));
+  }
+  const slotClusters = slotLevels.map((level) => (level === null ? NO_CLUSTERS : clusterLevels.get(level) ?? NO_CLUSTERS));
+  const slotActive = [0, 1].map((slot) => showClusters && slot === clusterSlot);
+  const slotVisible = [useLinger(slotActive[0], CLUSTER_FADE_MS), useLinger(slotActive[1], CLUSTER_FADE_MS)];
 
   const clusterLabels = (() => {
-    if (!showPins || !clusterView || !mapSize.width) return [];
-    const viewport = new WebMercatorViewport({ ...viewState, ...mapSize });
+    const viewport = mapSize.width ? new WebMercatorViewport({ ...viewState, ...mapSize }) : null;
     const margin = 40;
-    return clusters.flatMap((cluster) => {
-      const [x, y] = viewport.project(cluster.position);
-      const visible =
-        x > -margin && x < mapSize.width + margin && y > -margin && y < mapSize.height + margin;
-      return visible
-        ? [{ key: `${cluster.iso}-${cluster.id}`, x: Math.round(x), y: Math.round(y), text: formatCompact(cluster.count) }]
-        : [];
-    });
+    return slotClusters.map(({ clusters }, slot) =>
+      !viewport || !slotVisible[slot]
+        ? []
+        : clusters.flatMap((cluster) => {
+            const [x, y] = viewport.project(cluster.position);
+            const visible =
+              x > -margin && x < mapSize.width + margin && y > -margin && y < mapSize.height + margin;
+            return visible
+              ? [{ key: `${cluster.iso}-${cluster.id}`, x: Math.round(x), y: Math.round(y), text: formatCompact(cluster.count) }]
+              : [];
+          })
+    );
   })();
 
   const flyTo = (longitude: number, latitude: number, zoom: number) => {
@@ -434,13 +617,26 @@ export default function MapDashboard() {
     if (!country || !viewport) return;
     const target = (viewport as WebMercatorViewport).fitBounds(country.bounds, {
       padding: 60,
-      maxZoom: CLUSTER_MAX_ZOOM
+      maxZoom: STATE_MAX_ZOOM - 0.5
     });
     flyTo(target.longitude, target.latitude, Math.max(target.zoom, COUNTRY_MAX_ZOOM));
   };
 
+  const zoomToRegion = (id: string, viewport: PickingInfo["viewport"]) => {
+    const region = regionById.get(id);
+    if (!region || !viewport) return;
+    const target = (viewport as WebMercatorViewport).fitBounds(region.bounds, {
+      padding: 60,
+      maxZoom: CLUSTER_MAX_ZOOM
+    });
+    flyTo(target.longitude, target.latitude, Math.max(target.zoom, STATE_MAX_ZOOM));
+  };
+
   const countryLabelGroups = useMemo(
-    () => [false, true].map((onDark) => countryLabels.filter((d) => colorScale(d.count) > 0.5 === onDark)),
+    () =>
+      [false, true].map((onDark) =>
+        countryLabels.filter((d) => prefersWhiteText(rampColor(colorScale(d.count))) === onDark)
+      ),
     [countryLabels, colorScale]
   );
   const countryTotalsLayers = () =>
@@ -449,17 +645,42 @@ export default function MapDashboard() {
         new TextLayer<(typeof countryLabels)[number]>({
           id: `country-totals-${onDark ? "on-dark" : "on-light"}`,
           data: countryLabelGroups[group],
-          visible: showCountries,
-          pickable: true,
-          getPosition: (d) => d.position,
-          getText: (d) => formatCount(d.count),
-          getColor: onDark ? [255, 255, 255] : [30, 58, 138],
-          getSize: 14,
-          ...LABEL_FONT,
-          outlineWidth: 2.5,
-          outlineColor: onDark ? [30, 58, 138, 200] : [255, 255, 255, 220],
+          visible: countriesVisible,
+          opacity: showCountries ? 1 : 0,
+          transitions: BAND_FADE,
+          pickable: showCountries,
+          ...totalsStyle<(typeof countryLabels)[number]>(onDark),
           onClick: ({ object, viewport }) => {
             if (object) zoomToCountry(object.iso, viewport);
+          }
+        })
+    );
+
+  const regionLabelGroups = useMemo(
+    () =>
+      [false, true].map((onDark) =>
+        regionLabels.filter((d) => prefersWhiteText(rampColor(regionColorScale(d.count))) === onDark)
+      ),
+    [regionLabels, regionColorScale]
+  );
+  const stateTotalsLayers = () =>
+    !labelFontReady ? [] : [false, true].map(
+      (onDark, group) =>
+        new TextLayer<(typeof regionLabels)[number], CollisionFilterExtensionProps<(typeof regionLabels)[number]>>({
+          id: `state-totals-${onDark ? "on-dark" : "on-light"}`,
+          data: regionLabelGroups[group],
+          visible: statesVisible,
+          opacity: showStates ? 1 : 0,
+          transitions: BAND_FADE,
+          pickable: showStates,
+          ...totalsStyle<(typeof regionLabels)[number]>(onDark),
+          extensions: LABEL_COLLISION,
+          collisionEnabled: true,
+          collisionGroup: "state-totals",
+          getCollisionPriority: (d) => Math.round(100 * Math.log10(d.count)),
+          collisionTestProps: STATE_LABEL_COLLISION_TEST,
+          onClick: ({ object, viewport }) => {
+            if (object) zoomToRegion(object.id, viewport);
           }
         })
     );
@@ -467,31 +688,44 @@ export default function MapDashboard() {
   const clusterColor = (count: number) =>
     rampColor(0.625 + 0.375 * Math.min(1, Math.max(0, colorScale(count))));
 
+  const pinStyle = {
+    getPosition: (d: GeoPoint) => [d.longitude, d.latitude] as [number, number],
+    autoHighlight: true,
+    highlightColor: [15, 23, 42, 255] as [number, number, number, number],
+    radiusUnits: "pixels" as const,
+    getRadius: 4,
+    getFillColor: (d: GeoPoint) => COLORS[d.severity],
+    stroked: true,
+    getLineColor: [255, 255, 255] as [number, number, number],
+    lineWidthUnits: "pixels" as const,
+    getLineWidth: 1.5,
+    onClick: (info: PickingInfo<GeoPoint>) => {
+      if (info.object) setSelected(info.object);
+    }
+  };
+
   const layers = [
-    new HeatmapLayer<GeoPoint>({
+    new DormantHeatmapLayer({
       id: "ip-heatmap",
       data: points,
-      visible: showHeatmap,
+      visible: heatVisible,
+      opacity: showHeatmap ? (mode === "both" ? 0.6 : 1) : 0,
+      transitions: BAND_FADE,
       getPosition: (d) => [d.longitude, d.latitude],
       getWeight: (d) => d.weight,
       radiusPixels: Math.min(100, 34 + 16 * Math.max(0, heatZoomLevel - 2)),
-      opacity: mode === "both" ? 0.6 : 1,
       debounceTimeout: 150,
       intensity: 1.25,
       threshold: 0.04,
-      colorRange: [
-        [147, 197, 253],
-        [96, 165, 250],
-        [59, 130, 246],
-        [29, 78, 216],
-        [30, 58, 138]
-      ]
+      colorRange: HEAT_COLORS
     }),
     new GeoJsonLayer<CountryShape["properties"]>({
       id: "country-fill",
       data: shapesWithEvents,
-      visible: showCountries,
-      pickable: true,
+      visible: countriesVisible,
+      opacity: showCountries ? 1 : 0,
+      transitions: BAND_FADE,
+      pickable: showCountries,
       stroked: true,
       filled: true,
       getFillColor: (f) => rampColor(colorScale(countryByIso.get(f.properties.iso)?.count ?? 1)),
@@ -502,51 +736,76 @@ export default function MapDashboard() {
       }
     }),
     ...countryTotalsLayers(),
-    new ScatterplotLayer<Cluster>({
-      id: "cluster-halos",
-      data: clusters,
-      visible: showClusters,
-      radiusUnits: "pixels",
-      getPosition: (d) => d.position,
-      getRadius: (d) => clusterRadius(d.count) + 5,
-      getFillColor: (d) => [...clusterColor(d.count), 45]
-    }),
-    new ScatterplotLayer<Cluster>({
-      id: "clusters",
-      data: clusters,
-      visible: showClusters,
-      pickable: true,
-      autoHighlight: true,
-      highlightColor: [15, 23, 42, 255],
-      radiusUnits: "pixels",
-      getPosition: (d) => d.position,
-      getRadius: (d) => clusterRadius(d.count),
-      getFillColor: (d) => clusterColor(d.count),
-      onClick: ({ object }) => {
-        const index = object && countryByIso.get(object.iso)?.index;
-        if (!object || !index) return;
-        const zoom = Math.min(index.getClusterExpansionZoom(object.id), CLUSTER_MAX_ZOOM + 1);
-        flyTo(object.position[0], object.position[1], zoom);
+    new GeoJsonLayer<RegionShape["properties"]>({
+      id: "state-fill",
+      data: regionShapesWithEvents,
+      visible: statesVisible,
+      opacity: showStates ? 1 : 0,
+      transitions: BAND_FADE,
+      pickable: showStates,
+      stroked: true,
+      filled: true,
+      getFillColor: (f) => {
+        const count = regionById.get(f.properties.id)?.count;
+        return count ? rampColor(regionColorScale(count)) : EMPTY_STATE_FILL;
+      },
+      getLineColor: [255, 255, 255],
+      lineWidthMinPixels: 1,
+      onClick: ({ object, viewport }) => {
+        if (object) zoomToRegion(object.properties.id, viewport);
       }
     }),
+    ...stateTotalsLayers(),
+    ...slotClusters.flatMap(({ clusters, singles }, slot) => [
+      new ScatterplotLayer<Cluster>({
+        id: `cluster-halos-${slot}`,
+        data: clusters,
+        visible: slotVisible[slot],
+        opacity: slotActive[slot] ? 1 : 0,
+        transitions: CLUSTER_FADE,
+        radiusUnits: "pixels",
+        getPosition: (d) => d.position,
+        getRadius: (d) => clusterRadius(d.count) + 5,
+        getFillColor: (d) => [...clusterColor(d.count), 45]
+      }),
+      new ScatterplotLayer<Cluster>({
+        id: `clusters-${slot}`,
+        data: clusters,
+        visible: slotVisible[slot],
+        opacity: slotActive[slot] ? 1 : 0,
+        transitions: CLUSTER_FADE,
+        pickable: slotActive[slot],
+        autoHighlight: true,
+        highlightColor: [15, 23, 42, 255],
+        radiusUnits: "pixels",
+        getPosition: (d) => d.position,
+        getRadius: (d) => clusterRadius(d.count),
+        getFillColor: (d) => clusterColor(d.count),
+        onClick: ({ object }) => {
+          const index = object && countryByIso.get(object.iso)?.index;
+          if (!object || !index) return;
+          const zoom = Math.min(index.getClusterExpansionZoom(object.id), CLUSTER_MAX_ZOOM + 1);
+          flyTo(object.position[0], object.position[1], zoom);
+        }
+      }),
+      new ScatterplotLayer<GeoPoint>({
+        id: `ip-singles-${slot}`,
+        data: singles,
+        visible: slotVisible[slot],
+        opacity: slotActive[slot] ? 1 : 0,
+        transitions: CLUSTER_FADE,
+        pickable: slotActive[slot],
+        ...pinStyle
+      })
+    ]),
     new ScatterplotLayer<GeoPoint>({
       id: "ip-points",
-      data: pins,
-      visible: showPoints,
-      getPosition: (d) => [d.longitude, d.latitude],
-      pickable: true,
-      autoHighlight: true,
-      highlightColor: [15, 23, 42, 255],
-      radiusUnits: "pixels",
-      getRadius: 4,
-      getFillColor: (d) => COLORS[d.severity],
-      stroked: true,
-      getLineColor: [255, 255, 255],
-      lineWidthUnits: "pixels",
-      getLineWidth: 1.5,
-      onClick: (info: PickingInfo<GeoPoint>) => {
-        if (info.object) setSelected(info.object);
-      }
+      data: points,
+      visible: allPinsVisible,
+      opacity: showAllPins ? 1 : 0,
+      transitions: BAND_FADE,
+      pickable: showAllPins,
+      ...pinStyle
     })
   ].filter((layer) => prewarmLayers || layer.props.visible);
 
@@ -587,7 +846,8 @@ export default function MapDashboard() {
             }}
             onInteractionStateChange={({ inTransition, isDragging, isPanning, isRotating, isZooming }) => {
               window.clearTimeout(heatZoomTimerRef.current);
-              if (!(inTransition || isDragging || isPanning || isRotating || isZooming)) {
+              cameraBusyRef.current = Boolean(inTransition || isDragging || isPanning || isRotating || isZooming);
+              if (!cameraBusyRef.current && showHeatmap) {
                 heatZoomTimerRef.current = window.setTimeout(
                   () => setHeatZoomLevel(Math.floor(zoomRef.current)),
                   100
@@ -626,6 +886,14 @@ export default function MapDashboard() {
                     "boundary_country_outline"
                   );
                 }
+                if (map.getLayer("boundary_state")) {
+                  map.setFilter("boundary_state", [
+                    "all",
+                    ["match", ["get", "admin_level"], [3, 4], true, false],
+                    ["==", ["get", "maritime"], 0]
+                  ]);
+                  map.moveLayer("boundary_state", "boundary_country_outline");
+                }
                 setBasemapReady(true);
               }}
             />
@@ -641,25 +909,32 @@ export default function MapDashboard() {
             <span>{mapLoading ? "Loading map…" : "Map loaded"}</span>
           </div>
 
-          <div className="clusterLabels" aria-hidden>
-            {clusterLabels.map((label) => (
-              <span
-                key={label.key}
-                className="clusterLabel"
-                style={{ transform: `translate(${label.x}px, ${label.y}px)` }}
-              >
-                {label.text}
-              </span>
-            ))}
-          </div>
+          {clusterLabels.map((labels, slot) => (
+            <div
+              key={slot}
+              className="clusterLabels"
+              style={{ opacity: slotActive[slot] ? 1 : 0, transition: `opacity ${CLUSTER_FADE_MS}ms ease` }}
+              aria-hidden
+            >
+              {labels.map((label) => (
+                <span
+                  key={label.key}
+                  className="clusterLabel"
+                  style={{ transform: `translate(${label.x}px, ${label.y}px)` }}
+                >
+                  {label.text}
+                </span>
+              ))}
+            </div>
+          ))}
 
-          {showPins && countryView ? (
+          {showPins && totalsView ? (
             <div className="legend scale">
-              <div className="scaleTitle">Events per country · log scale</div>
+              <div className="scaleTitle">Events per {countryView ? "country" : "state"} · log scale</div>
               <div className="scaleBar" />
               <div className="scaleLabels">
-                <span>{formatCount(Math.min(...countries.map((c) => c.count)))}</span>
-                <span>{formatCount(Math.max(...countries.map((c) => c.count)))}</span>
+                <span>{formatCount(Math.min(...legendTotals))}</span>
+                <span>{formatCount(Math.max(...legendTotals))}</span>
               </div>
             </div>
           ) : (
